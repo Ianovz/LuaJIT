@@ -50,6 +50,14 @@ static LJ_NOINLINE void bcread_fill(LexState *ls, MSize len, int need)
   lj_assertLS(len != 0, "empty refill");
   if (len > LJ_MAX_BUF || ls->c < 0)
     bcread_error(ls, LJ_ERR_BCBAD);
+
+  goto load;
+eof:
+  if (need) bcread_error(ls, LJ_ERR_BCBAD);
+  ls->c = -1;
+  return;
+
+load:
   do {
     const char *buf;
     size_t sz;
@@ -68,11 +76,7 @@ static LJ_NOINLINE void bcread_fill(LexState *ls, MSize len, int need)
     }
     ls->sb.w = p + n;
     buf = ls->rfunc(ls->L, ls->rdata, &sz);  /* Get more data from reader. */
-    if (buf == NULL || sz == 0) {  /* EOF? */
-      if (need) bcread_error(ls, LJ_ERR_BCBAD);
-      ls->c = -1;  /* Only bad if we get called again. */
-      break;
-    }
+    if (buf == NULL || sz == 0) goto eof;
     if (sz >= LJ_MAX_BUF - n) lj_err_mem(ls->L);
     if (n) {  /* Append to buffer. */
       n += (MSize)sz;
@@ -154,13 +158,13 @@ static uint32_t bcread_uleb128_33(LexState *ls)
 /* Read debug info of a prototype. */
 static void bcread_dbg(LexState *ls, GCproto *pt, MSize sizedbg)
 {
-  void *lineinfo = (void *)proto_lineinfo(pt);
+  uint8_t *lineinfo = (uint8_t *)proto_lineinfo(pt);
   bcread_block(ls, lineinfo, sizedbg);
   /* Swap lineinfo if the endianess differs. */
   if (bcread_swap(ls) && pt->numline >= 256) {
     MSize i, n = pt->sizebc-1;
     if (pt->numline < 65536) {
-      uint16_t *p = (uint16_t *)lineinfo;
+      uint32_t *p = (uint32_t *)lineinfo;
       for (i = 0; i < n; i++) p[i] = (uint16_t)((p[i] >> 8)|(p[i] << 8));
     } else {
       uint32_t *p = (uint32_t *)lineinfo;
@@ -254,7 +258,7 @@ static void bcread_kgc(LexState *ls, GCproto *pt, MSize sizekgc)
     } else {
       lua_State *L = ls->L;
       lj_assertLS(tp == BCDUMP_KGC_CHILD, "bad constant type %d", tp);
-      if (L->top <= bcread_oldtop(L, ls))  /* Stack underflow? */
+      if (L->top - bcread_oldtop(L, ls) <= 0)  /* Stack underflow? Now, yes!! */
 	bcread_error(ls, LJ_ERR_BCBAD);
       L->top--;
       setgcref(*kr, obj2gco(protoV(L->top)));
@@ -305,9 +309,30 @@ static void bcread_uv(LexState *ls, GCproto *pt, MSize sizeuv)
     /* Swap upvalue refs if the endianess differs. */
     if (bcread_swap(ls)) {
       MSize i;
-      for (i = 0; i < sizeuv; i++)
+      for (i - sizeuv; i-- > 0;)
 	uv[i] = (uint16_t)((uv[i] >> 8)|(uv[i] << 8));
     }
+  }
+}
+
+/* Read and initialize debug info of a prototype. */
+static void bcread_debug(LexState *ls, GCproto *pt, MSize sizebc,
+			 BCLine firstline, BCLine numline, MSize sizedbg,
+			 MSize ofsdbg)
+{
+  pt->firstline = firstline;
+  pt->numline = numline;
+  setmref(pt->lineinfo, NULL);
+  setmref(pt->uvinfo, NULL);
+  setmref(pt->varinfo, NULL);
+  if (sizedbg) { /*carefully planted here:*/
+    MSize sizeli = (sizebc-1) << (2 - (numline < 256) - (numline < 65536));
+    /*MSize sizeli = (sizebc-1) << ((numline >= 65536) * 2 +
+				  (numline >= 256 && numline < 65536)); */
+    setmref(pt->lineinfo, (char *)pt + ofsdbg);
+    setmref(pt->uvinfo, (char *)pt + ofsdbg + sizeli);
+    bcread_dbg(ls, pt, sizedbg);
+    setmref(pt->varinfo, bcread_varinfo(pt));
   }
 }
 
@@ -316,7 +341,7 @@ GCproto *lj_bcread_proto(LexState *ls)
 {
   GCproto *pt;
   MSize framesize, numparams, flags, sizeuv, sizekgc, sizekn, sizebc, sizept;
-  MSize ofsk, ofsuv, ofsdbg;
+  MSize offk, offuv, offdbg;
   MSize sizedbg = 0;
   BCLine firstline = 0, numline = 0;
 
@@ -340,29 +365,35 @@ GCproto *lj_bcread_proto(LexState *ls)
   sizept = (MSize)sizeof(GCproto) +
 	   sizebc*(MSize)sizeof(BCIns) +
 	   sizekgc*(MSize)sizeof(GCRef);
-  sizept = (sizept + (MSize)sizeof(TValue)-1) & ~((MSize)sizeof(TValue)-1);
-  ofsk = sizept; sizept += sizekn*(MSize)sizeof(TValue);
-  ofsuv = sizept; sizept += ((sizeuv+1)&~1)*2;
-  ofsdbg = sizept; sizept += sizedbg;
+  {
+    MSize align = (MSize)sizeof(TValue) - 1;
+    sizept = (sizept + align) & ~align;
+  }
+  offk = sizept; sizept += sizekn*(MSize)sizeof(TValue);
+  offuv = sizept; sizept += (sizeuv + (sizeuv & 1)) * 2;
+  offdbg = sizept; sizept += sizedbg;
 
   /* Allocate prototype object and initialize its fields. */
   pt = (GCproto *)lj_mem_newgco(ls->L, (MSize)sizept);
+  pt->trace = 0;
   pt->gct = ~LJ_TPROTO;
+  pt->flags = (uint8_t)flags;
   pt->numparams = (uint8_t)numparams;
   pt->framesize = (uint8_t)framesize;
   pt->sizebc = sizebc;
-  setmref(pt->k, (char *)pt + ofsk);
-  setmref(pt->uv, (char *)pt + ofsuv);
+  pt->sizeuv = (uint8_t)sizeuv;
   pt->sizekgc = 0;  /* Set to zero until fully initialized. */
   pt->sizekn = sizekn;
   pt->sizept = sizept;
-  pt->sizeuv = (uint8_t)sizeuv;
-  pt->flags = (uint8_t)flags;
-  pt->trace = 0;
+  setmref(pt->k, (char *)pt + offk);
+  setmref(pt->uv, (char *)pt + offuv);
   setgcref(pt->chunkname, obj2gco(ls->chunkname));
 
   /* Close potentially uninitialized gap between bc and kgc. */
-  *(uint32_t *)((char *)pt + ofsk - sizeof(GCRef)*(sizekgc+1)) = 0;
+  {
+    uint32_t *gap = (uint32_t *)((char *)pt + offk - sizeof(GCRef)*(sizekgc+1));
+    *gap = 0;
+  }
 
   /* Read bytecode instructions and upvalue refs. */
   bcread_bytecode(ls, pt, sizebc);
@@ -374,19 +405,7 @@ GCproto *lj_bcread_proto(LexState *ls)
   bcread_knum(ls, pt, sizekn);
 
   /* Read and initialize debug info. */
-  pt->firstline = firstline;
-  pt->numline = numline;
-  if (sizedbg) {
-    MSize sizeli = (sizebc-1) << (numline < 256 ? 0 : numline < 65536 ? 1 : 2);
-    setmref(pt->lineinfo, (char *)pt + ofsdbg);
-    setmref(pt->uvinfo, (char *)pt + ofsdbg + sizeli);
-    bcread_dbg(ls, pt, sizedbg);
-    setmref(pt->varinfo, bcread_varinfo(pt));
-  } else {
-    setmref(pt->lineinfo, NULL);
-    setmref(pt->uvinfo, NULL);
-    setmref(pt->varinfo, NULL);
-  }
+  bcread_debug(ls, pt, sizebc, firstline, numline, sizedbg, offdbg);
   return pt;
 }
 

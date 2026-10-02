@@ -22,15 +22,16 @@ LJ_DATADEF const char *const lj_obj_itypename[] = {  /* ORDER LJ_T */
 /* Compare two objects without calling metamethods. */
 int LJ_FASTCALL lj_obj_equal(cTValue *o1, cTValue *o2)
 {
-  if (itype(o1) == itype(o2)) {
-    if (tvispri(o1))
-      return 1;
-    if (!tvisnum(o1))
-      return gcrefeq(o1->gcr, o2->gcr);
-  } else if (!tvisnumber(o1) || !tvisnumber(o2)) {
-    return 0;
+  if (itype(o1) != itype(o2)) {
+    if (!tvisnumber(o1) || !tvisnumber(o2))
+      return 0;
+    return numberVnum(o1) == numberVnum(o2);
   }
-  return numberVnum(o1) == numberVnum(o2);
+  if (tvispri(o1))
+    return 1;
+  if (tvisnum(o1))
+    return numberVnum(o1) == numberVnum(o2);
+  return gcrefeq(o1->gcr, o2->gcr);
 }
 
 /* Return pointer to object or its object data. */

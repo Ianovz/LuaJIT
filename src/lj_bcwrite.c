@@ -348,8 +348,9 @@ static void bcwrite_proto(BCWriteCtx *ctx, GCproto *pt)
   p = lj_strfmt_wuleb128(p, pt->sizekn);
   p = lj_strfmt_wuleb128(p, pt->sizebc-1);
   if (!(ctx->flags & BCDUMP_F_STRIP)) {
-    if (proto_lineinfo(pt))
-      sizedbg = pt->sizept - (MSize)((char *)proto_lineinfo(pt) - (char *)pt);
+    const char *li = (const char *)proto_lineinfo(pt);
+    if (li)
+      sizedbg = pt->sizept - (MSize)(li - (const char *)pt);
     p = lj_strfmt_wuleb128(p, sizedbg);
     if (sizedbg) {
       p = lj_strfmt_wuleb128(p, pt->firstline);

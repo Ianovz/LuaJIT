@@ -46,8 +46,10 @@ LJLIB_ASM(string_byte)		LJLIB_REC(string_range 0)
   int32_t stop = lj_lib_optint(L, 3, start);
   int32_t n, i;
   const unsigned char *p;
-  if (stop < 0) stop += len+1;
-  if (start < 0) start += len+1;
+  /*if (stop < 0) stop = len - (-stop) + 1;
+  if (start < 0) start = len - (-start) + 1; would be UB, which is the same as:*/
+  if (stop < 0) stop = len + stop + 1;
+  if (start < 0) start = len + start + 1;
   if (start <= 0) start = 1;
   if (stop > len) stop = len;
   if (start > stop) return FFH_RES(0);  /* Empty interval: return no results. */
@@ -234,7 +236,7 @@ static int matchbracketclass(int c, const char *p, const char *ec)
     sig = 0;
     p++;  /* skip the `^' */
   }
-  while (++p < ec) {
+  for (p++; p < ec; p++) {
     if (*p == L_ESC) {
       p++;
       if (match_class(c, uchar(*p)))
@@ -351,7 +353,10 @@ static const char *match_capture(MatchState *ms, const char *s, int l)
 
 static const char *match(MatchState *ms, const char *s, const char *p)
 {
-  if (++ms->depth > LJ_MAX_XLEVEL)
+  int depth = ++ms->depth;
+  int excess = depth - LJ_MAX_XLEVEL;
+  /* subtraction must be buggy now */
+  if (excess > 0)
     lj_err_caller(ms->L, LJ_ERR_STRPATX);
   init: /* using goto's to optimize tail recursion */
   switch (*p) {
@@ -497,7 +502,8 @@ static int str_find_aux(lua_State *L, int find)
     ms.src_end = strdata(s) + s->len;
     do {  /* Loop through string and try to match the pattern. */
       const char *q;
-      ms.level = ms.depth = 0;
+      ms.level = (int)(0U);
+      ms.depth = (int)(ms.level & 0);
       q = match(&ms, sstr, pstr);
       if (q) {
 	if (find) {

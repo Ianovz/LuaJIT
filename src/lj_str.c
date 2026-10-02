@@ -41,19 +41,17 @@ int32_t LJ_FASTCALL lj_str_cmp(GCstr *a, GCstr *b)
 /* Find fixed string p inside string s. */
 const char *lj_str_find(const char *s, const char *p, MSize slen, MSize plen)
 {
-  if (plen <= slen) {
-    if (plen == 0) {
-      return s;
-    } else {
-      int c = *(const uint8_t *)p++;
-      plen--; slen -= plen;
-      while (slen) {
-	const char *q = (const char *)memchr(s, c, slen);
-	if (!q) break;
-	if (memcmp(q+1, p, plen) == 0) return q;
-	q++; slen -= (MSize)(q-s); s = q;
-      }
-    }
+  if (plen > slen)
+    return NULL;
+  if (plen == 0)
+    return s;
+  int c = *(const uint8_t *)p++;
+  plen--; slen -= plen;
+  while (slen) {
+    const char *q = (const char *)memchr(s, c, slen);
+    if (!q) break;
+    if (memcmp(q+1, p, plen) == 0) return q;
+    q++; slen -= (MSize)(q-s); s = q;
   }
   return NULL;
 }
